@@ -1,4 +1,4 @@
-// crun.cpp (main + Unicode変換版)
+// crun.cpp
 
 #define UNICODE
 #define _UNICODE
@@ -19,7 +19,7 @@
 namespace fs = std::filesystem;
 
 // -----------------------------------------------------------------------------
-// 構造体とヘルパー関数 (ワイド文字対応) - 変更なし
+// 構造体とヘルパー関数
 // -----------------------------------------------------------------------------
 struct ProgramOptions {
     fs::path source_file;
@@ -44,7 +44,7 @@ void print_help() {
 }
 
 void print_version() {
-    std::wcout << L"crun 0.2.1 (Unicode support)\n";
+    std::wcout << L"crun 0.1.0\n";
 }
 
 fs::path create_unique_temp_dir_path(const fs::path& base_path) {
@@ -113,7 +113,7 @@ int run_program_and_get_exit_code(const std::wstring& command_line) {
 
 
 // -----------------------------------------------------------------------------
-// ★★★ main関数 (wmainからmainに戻し、内部でUnicode引数に変換) ★★★
+// ★★★ main関数 ★★★
 // -----------------------------------------------------------------------------
 int main() { // 標準のmainを使用
     int argc;
@@ -165,7 +165,6 @@ int main() { // 標準のmainを使用
         return 1;
     }
 
-    // (ここから先の処理はほぼ同じ)
     std::wstring ext = options.source_file.extension().wstring();
     if (ext != L".c" && ext != L".cpp") {
         std::wcerr << L"Error: Unsupported file type: " << ext << L". Only .c and .cpp are supported.\n";
@@ -232,7 +231,7 @@ int main() { // 標準のmainを使用
     
     std::wcout << L"\n--- Finished ---\n" << L"Program exited with code " << exit_code << L".\n";
 
-    // 最後に取得した引数配列のメモリを解放する
+    // コマンドライン引数のメモリを解放する
     LocalFree(argv);
     return exit_code;
 }
