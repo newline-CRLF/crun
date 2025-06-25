@@ -1,4 +1,5 @@
 // crun.cpp
+// C/C++ソースファイルを一時ディレクトリでコンパイルし、実行する簡易ランナー
 
 #define UNICODE
 #define _UNICODE
@@ -12,23 +13,26 @@
 #include <sstream>
 #include <cstdlib>
 #include <windows.h>
-#include <shellapi.h> // CommandLineToArgvW のため
+#include <shellapi.h> // CommandLineToArgvWのため
 
-#pragma comment(lib, "shell32.lib") // CommandLineToArgvW をリンクするため
+#pragma comment(lib, "shell32.lib") // CommandLineToArgvW用
 
 namespace fs = std::filesystem;
 
 // -----------------------------------------------------------------------------
-// 構造体とヘルパー関数
+// オプション情報を保持する構造体
 // -----------------------------------------------------------------------------
 struct ProgramOptions {
-    fs::path source_file;
-    std::wstring compiler_flags;
-    std::vector<std::wstring> program_args;
-    bool keep_temp = false; // 一時ディレクトリを保持するオプション
-    bool verbose = false; // 詳細出力オプション
+    fs::path source_file;                // ソースファイルのパス
+    std::wstring compiler_flags;         // 追加のコンパイラフラグ
+    std::vector<std::wstring> program_args; // 実行時引数
+    bool keep_temp = false;              // 一時ディレクトリを保持するか
+    bool verbose = false;                // 詳細出力を有効にするか
 };
 
+// -----------------------------------------------------------------------------
+// ヘルプメッセージを表示する
+// -----------------------------------------------------------------------------
 void print_help() {
     std::wcout << L"crun - A simple C/C++ runner.\n\n"
                << L"USAGE:\n"
@@ -45,10 +49,17 @@ void print_help() {
                << L"    crun math.c --cflags \"-O2 -lm\"\n";
 }
 
+// -----------------------------------------------------------------------------
+// バージョン情報を表示する
+// -----------------------------------------------------------------------------
 void print_version() {
     std::wcout << L"crun 0.1.1\n";
 }
 
+// -----------------------------------------------------------------------------
+// 一意な一時ディレクトリのパスを生成する
+// base_path配下に、ナノ秒＋乱数で衝突しにくいディレクトリ名を作る
+// -----------------------------------------------------------------------------
 fs::path create_unique_temp_dir_path(const fs::path& base_path) {
     auto now = std::chrono::high_resolution_clock::now();
     auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
@@ -60,6 +71,10 @@ fs::path create_unique_temp_dir_path(const fs::path& base_path) {
     return base_path / ss.str();
 }
 
+// -----------------------------------------------------------------------------
+// PATH環境変数から指定した実行ファイル(例: gcc.exe)を探す
+// 見つかればそのパスを返す。なければ空文字。
+// -----------------------------------------------------------------------------
 fs::path find_executable_in_path(const std::wstring& exe_name) {
     const wchar_t* path_env_var = _wgetenv(L"PATH");
     if (path_env_var == nullptr) return L"";
@@ -73,10 +88,15 @@ fs::path find_executable_in_path(const std::wstring& exe_name) {
     return L"";
 }
 
+// -----------------------------------------------------------------------------
+// 指定したコマンドラインでプロセスを実行し、正常終了したかどうかを返す
+// 標準入出力・エラーは親プロセスに引き継ぐ
+// -----------------------------------------------------------------------------
 bool run_process(const std::wstring& command_line) {
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
-    ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si);
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
@@ -89,14 +109,20 @@ bool run_process(const std::wstring& command_line) {
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD exit_code;
     GetExitCodeProcess(pi.hProcess, &exit_code);
-    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
     return exit_code == 0;
 }
 
+// -----------------------------------------------------------------------------
+// 指定したコマンドラインでプログラムを実行し、終了コードを返す
+// 標準入出力・エラーは親プロセスに引き継ぐ
+// -----------------------------------------------------------------------------
 int run_program_and_get_exit_code(const std::wstring& command_line) {
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
-    ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si);
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
@@ -109,13 +135,13 @@ int run_program_and_get_exit_code(const std::wstring& command_line) {
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD exit_code;
     GetExitCodeProcess(pi.hProcess, &exit_code);
-    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
     return static_cast<int>(exit_code);
 }
 
-
 // -----------------------------------------------------------------------------
-// ★★★ main関数 ★★★
+// メイン関数: 引数解析、コンパイル、実行、一時ディレクトリ管理
 // -----------------------------------------------------------------------------
 int main() {
     int argc;
@@ -125,7 +151,7 @@ int main() {
         return 1;
     }
 
-    // --- 引数解析 ---
+    // 引数解析
     if (argc < 2) {
         print_help();
         LocalFree(argv);
@@ -144,7 +170,6 @@ int main() {
         if (arg == L"--help") { print_help(); LocalFree(argv); return 0; }
         if (arg == L"--version") { print_version(); LocalFree(argv); return 0; }
         if (arg == L"--keep-temp") { options.keep_temp = true; continue; }
-        // ★ --verbose と -v を追加
         if (arg == L"--verbose" || arg == L"-v") { options.verbose = true; continue; }
         if (arg == L"--cflags") { cflags_next = true; continue; }
         if (arg.rfind(L"--", 0) == 0) {
@@ -160,47 +185,60 @@ int main() {
     if (cflags_next) { std::wcerr << L"Error: --cflags requires an argument.\n"; LocalFree(argv); return 1; }
     if (options.source_file.empty()) { std::wcerr << L"Error: No source file specified.\n"; print_help(); LocalFree(argv); return 1; }
 
-    // --- ファイルシステム準備 ---
+    // ソースファイル存在チェック
     if (!fs::exists(options.source_file)) {
         std::wcerr << L"Error: Source file not found: " << options.source_file.c_str() << L"\n";
         LocalFree(argv);
         return 1;
     }
 
+    // 拡張子チェック
     std::wstring ext = options.source_file.extension().wstring();
     if (ext != L".c" && ext != L".cpp") {
         std::wcerr << L"Error: Unsupported file type: " << ext << L". Only .c and .cpp are supported.\n";
         LocalFree(argv); return 1;
     }
     
+    // 一時ディレクトリ作成
     fs::path source_dir = options.source_file.parent_path();
     if (source_dir.empty()) { source_dir = L"."; }
     fs::path temp_dir = create_unique_temp_dir_path(source_dir);
 
-    try { fs::create_directory(temp_dir); }
-    catch (const fs::filesystem_error& e) {
-        std::string narrow_what = e.what(); std::wstring wide_what(narrow_what.begin(), narrow_what.end());
+    try {
+        fs::create_directory(temp_dir);
+    } catch (const fs::filesystem_error& e) {
+        std::string narrow_what = e.what();
+        std::wstring wide_what(narrow_what.begin(), narrow_what.end());
         std::wcerr << L"Error: Failed to create temporary directory: " << wide_what << L"\n";
         LocalFree(argv); return 1;
     }
     
+    // 実行ファイルのパスを決定
     fs::path executable_path = temp_dir / options.source_file.stem().replace_extension(L".exe");
 
+    // スコープ終了時に一時ディレクトリを削除するガード
     struct TempDirGuard {
-        const fs::path& dir; const bool& keep;
+        const fs::path& dir;
+        const bool& keep;
         ~TempDirGuard() {
             if (!keep && fs::exists(dir)) {
-                std::error_code ec; fs::remove_all(dir, ec);
-                if (ec) { std::wcerr << L"Warning: Failed to remove temporary directory: " << dir.c_str() << L"\n"; }
+                std::error_code ec;
+                fs::remove_all(dir, ec);
+                if (ec) {
+                    std::wcerr << L"Warning: Failed to remove temporary directory: " << dir.c_str() << L"\n";
+                }
             }
         }
     };
     TempDirGuard guard{temp_dir, options.keep_temp};
 
-    // --- コンパイルと実行 ---
+    // コンパイラのパスを検索
     fs::path compiler_path;
-    if (ext == L".cpp") { compiler_path = find_executable_in_path(L"g++.exe"); }
-    else { compiler_path = find_executable_in_path(L"gcc.exe"); }
+    if (ext == L".cpp") {
+        compiler_path = find_executable_in_path(L"g++.exe");
+    } else {
+        compiler_path = find_executable_in_path(L"gcc.exe");
+    }
     
     if (compiler_path.empty()) {
         std::wcerr << L"Error: Compiler (g++.exe or gcc.exe) not found in PATH.\n"
@@ -208,19 +246,20 @@ int main() {
         LocalFree(argv); return 1;
     }
 
+    // コンパイルコマンド生成
     std::wstringstream compile_command;
     compile_command << L"\"" << compiler_path.wstring() << L"\" "
                     << L"\"" << fs::absolute(options.source_file).wstring() << L"\" "
                     << L"-o \"" << executable_path.wstring() << L"\" "
                     << options.compiler_flags;
 
-    // ★ verbose フラグで出力制御
+    // 詳細出力
     if (options.verbose) {
         std::wcout << L"--- Compiling ---\n" << L"Command: " << compile_command.str() << L"\n";
     }
 
+    // コンパイル実行
     if (!run_process(compile_command.str())) {
-        // コンパイルエラーは常に表示する
         if (options.verbose) {
              std::wcerr << L"-------------------\n";
         }
@@ -232,6 +271,7 @@ int main() {
         std::wcout << L"Compilation successful.\n";
     }
 
+    // 実行コマンド生成
     std::wstringstream run_command;
     run_command << L"\"" << executable_path.wstring() << L"\"";
     for (const auto& arg : options.program_args) {
@@ -242,6 +282,7 @@ int main() {
         std::wcout << L"--- Running ---\n" << std::flush;
     }
 
+    // プログラム実行
     int exit_code = run_program_and_get_exit_code(run_command.str());
     
     if (options.verbose) {
