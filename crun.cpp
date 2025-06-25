@@ -25,7 +25,8 @@ struct ProgramOptions {
     fs::path source_file;
     std::wstring compiler_flags;
     std::vector<std::wstring> program_args;
-    bool keep_temp = false;
+    bool keep_temp = false; // 一時ディレクトリを保持するオプション
+    bool verbose = false; // 詳細出力オプション
 };
 
 void print_help() {
@@ -36,15 +37,16 @@ void print_help() {
                << L"    --help              Show this help message.\n"
                << L"    --version           Show version information.\n"
                << L"    --cflags \"<flags>\"  Pass additional flags to the compiler.\n"
-               << L"    --keep-temp         Keep the temporary directory after execution.\n\n"
+               << L"    --keep-temp         Keep the temporary directory after execution.\n"
+               << L"    --verbose, -v       Enable verbose output.\n\n"
                << L"EXAMPLE:\n"
                << L"    crun hello.c\n"
-               << L"    crun app.cpp arg1 arg2\n"
+               << L"    crun app.cpp arg1 arg2 --verbose\n"
                << L"    crun math.c --cflags \"-O2 -lm\"\n";
 }
 
 void print_version() {
-    std::wcout << L"crun 0.1.0\n";
+    std::wcout << L"crun 0.1.1\n";
 }
 
 fs::path create_unique_temp_dir_path(const fs::path& base_path) {
@@ -115,27 +117,25 @@ int run_program_and_get_exit_code(const std::wstring& command_line) {
 // -----------------------------------------------------------------------------
 // ★★★ main関数 ★★★
 // -----------------------------------------------------------------------------
-int main() { // 標準のmainを使用
+int main() {
     int argc;
-    // GetCommandLineWでコマンドライン全体をワイド文字で取得し、
-    // CommandLineToArgvWで引数配列に分割する
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv == NULL) {
         std::cerr << "Fatal: Failed to get command line arguments.\n";
         return 1;
     }
 
-    // --- 引数解析 (wchar_t** を使う) ---
+    // --- 引数解析 ---
     if (argc < 2) {
         print_help();
-        LocalFree(argv); // メモリ解放
+        LocalFree(argv);
         return 1;
     }
 
     ProgramOptions options;
     bool cflags_next = false;
     for (int i = 1; i < argc; ++i) {
-        std::wstring_view arg(argv[i]); // wstring_viewで扱う
+        std::wstring_view arg(argv[i]);
         if (cflags_next) {
             options.compiler_flags = arg;
             cflags_next = false;
@@ -144,6 +144,8 @@ int main() { // 標準のmainを使用
         if (arg == L"--help") { print_help(); LocalFree(argv); return 0; }
         if (arg == L"--version") { print_version(); LocalFree(argv); return 0; }
         if (arg == L"--keep-temp") { options.keep_temp = true; continue; }
+        // ★ --verbose と -v を追加
+        if (arg == L"--verbose" || arg == L"-v") { options.verbose = true; continue; }
         if (arg == L"--cflags") { cflags_next = true; continue; }
         if (arg.rfind(L"--", 0) == 0) {
             std::wcerr << L"Error: Unknown option '" << arg << L"'.\n"; LocalFree(argv); return 1;
@@ -170,15 +172,14 @@ int main() { // 標準のmainを使用
         std::wcerr << L"Error: Unsupported file type: " << ext << L". Only .c and .cpp are supported.\n";
         LocalFree(argv); return 1;
     }
-
+    
     fs::path source_dir = options.source_file.parent_path();
     if (source_dir.empty()) { source_dir = L"."; }
     fs::path temp_dir = create_unique_temp_dir_path(source_dir);
 
     try { fs::create_directory(temp_dir); }
     catch (const fs::filesystem_error& e) {
-        std::string narrow_what = e.what();
-        std::wstring wide_what(narrow_what.begin(), narrow_what.end());
+        std::string narrow_what = e.what(); std::wstring wide_what(narrow_what.begin(), narrow_what.end());
         std::wcerr << L"Error: Failed to create temporary directory: " << wide_what << L"\n";
         LocalFree(argv); return 1;
     }
@@ -213,12 +214,23 @@ int main() { // 標準のmainを使用
                     << L"-o \"" << executable_path.wstring() << L"\" "
                     << options.compiler_flags;
 
-    std::wcout << L"--- Compiling ---\n" << L"Command: " << compile_command.str() << L"\n";
+    // ★ verbose フラグで出力制御
+    if (options.verbose) {
+        std::wcout << L"--- Compiling ---\n" << L"Command: " << compile_command.str() << L"\n";
+    }
+
     if (!run_process(compile_command.str())) {
-        std::wcerr << L"-------------------\n" << L"Compilation failed.\n";
+        // コンパイルエラーは常に表示する
+        if (options.verbose) {
+             std::wcerr << L"-------------------\n";
+        }
+        std::wcerr << L"Compilation failed.\n";
         LocalFree(argv); return 1;
     }
-    std::wcout << L"Compilation successful.\n";
+
+    if (options.verbose) {
+        std::wcout << L"Compilation successful.\n";
+    }
 
     std::wstringstream run_command;
     run_command << L"\"" << executable_path.wstring() << L"\"";
@@ -226,12 +238,16 @@ int main() { // 標準のmainを使用
         run_command << L" \"" << arg << L"\"";
     }
 
-    std::wcout << L"--- Running ---\n";
+    if (options.verbose) {
+        std::wcout << L"--- Running ---\n" << std::flush;
+    }
+
     int exit_code = run_program_and_get_exit_code(run_command.str());
     
-    std::wcout << L"\n--- Finished ---\n" << L"Program exited with code " << exit_code << L".\n";
+    if (options.verbose) {
+        std::wcout << L"\n--- Finished ---\n" << L"Program exited with code " << exit_code << L".\n";
+    }
 
-    // コマンドライン引数のメモリを解放する
     LocalFree(argv);
     return exit_code;
 }
