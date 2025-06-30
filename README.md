@@ -43,6 +43,7 @@ crun hello.c
 crun app.cpp arg1 arg2 --verbose
 crun math.c --cflags "-O2 -lm"
 crun test.cpp --keep-temp
+crun benchmark.cpp --time
 ```
 
 ---
@@ -56,6 +57,7 @@ crun test.cpp --keep-temp
 | `--cflags "<flags>"`     | 追加のコンパイルフラグを指定             |
 | `--keep-temp`            | 実行後も一時ディレクトリを削除しない     |
 | `--verbose`, `-v`        | 詳細な出力を有効化                       |
+| `--time`                 | プログラムの実行時間を計測・表示         |
 
 - オプションは**どの位置でも指定可能**です（例: `crun --verbose hello.c` もOK）。
 - `--cflags`の直後にフラグ文字列を指定してください（例: `--cflags "-Wall -O2"`）。

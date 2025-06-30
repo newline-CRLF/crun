@@ -28,6 +28,7 @@ struct ProgramOptions {
     std::vector<std::wstring> program_args; // 実行時引数
     bool keep_temp = false;              // 一時ディレクトリを保持するか
     bool verbose = false;                // 詳細出力を有効にするか
+    bool measure_time = false;           // 実行時間を計測するか
 };
 
 // -----------------------------------------------------------------------------
@@ -43,17 +44,19 @@ void print_help() {
                << L"    --cflags \"<flags>\"  Pass additional flags to the compiler.\n"
                << L"    --keep-temp         Keep the temporary directory after execution.\n"
                << L"    --verbose, -v       Enable verbose output.\n\n"
+               << L"    --time              Measure and show the execution time of the program.\n\n"
                << L"EXAMPLE:\n"
                << L"    crun hello.c\n"
                << L"    crun app.cpp arg1 arg2 --verbose\n"
-               << L"    crun math.c --cflags \"-O2 -lm\"\n";
+               << L"    crun math.c --cflags \"-O2 -lm\"\n"
+               << L"    crun benchmark.cpp --time\n";
 }
 
 // -----------------------------------------------------------------------------
 // バージョン情報を表示する
 // -----------------------------------------------------------------------------
 void print_version() {
-    std::wcout << L"crun 0.1.1\n";
+    std::wcout << L"crun 0.2.0\n";
 }
 
 // -----------------------------------------------------------------------------
@@ -171,6 +174,7 @@ int main() {
         if (arg == L"--version") { print_version(); LocalFree(argv); return 0; }
         if (arg == L"--keep-temp") { options.keep_temp = true; continue; }
         if (arg == L"--verbose" || arg == L"-v") { options.verbose = true; continue; }
+        if (arg == L"--time") { options.measure_time = true; continue; }
         if (arg == L"--cflags") { cflags_next = true; continue; }
         if (arg.rfind(L"--", 0) == 0) {
             std::wcerr << L"Error: Unknown option '" << arg << L"'.\n"; LocalFree(argv); return 1;
@@ -283,10 +287,18 @@ int main() {
     }
 
     // プログラム実行
+    auto start_time = std::chrono::high_resolution_clock::now();
     int exit_code = run_program_and_get_exit_code(run_command.str());
+    auto end_time = std::chrono::high_resolution_clock::now();
     
     if (options.verbose) {
         std::wcout << L"\n--- Finished ---\n" << L"Program exited with code " << exit_code << L".\n";
+    }
+
+    // 実行時間を表示
+    if (options.measure_time) {
+        std::chrono::duration<double, std::milli> elapsed_ms = end_time - start_time;
+        std::wcout << L"\nExecution time: " << elapsed_ms.count() << L" ms\n";
     }
 
     LocalFree(argv);
