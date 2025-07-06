@@ -1,8 +1,8 @@
 ﻿#include <winver.h>
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,2,0,0
- PRODUCTVERSION 0,2,0,0
+ FILEVERSION 0,3,0,0
+ PRODUCTVERSION 0,3,0,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -19,12 +19,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "とある高専"
             VALUE "FileDescription", "C/C++ソースファイルを自動コンパイル＆実行するツール" // ここが「説明」になります
-            VALUE "FileVersion", "0.2.0.0"
+            VALUE "FileVersion", "0.3.0.0"
             VALUE "InternalName", "crun.exe"
             VALUE "LegalCopyright", "Copyright (C) 2025- CR-LF/newline-CRLF"
             VALUE "OriginalFilename", "crun.exe"
             VALUE "ProductName", "crun"
-            VALUE "ProductVersion", "0.2.0.0"
+            VALUE "ProductVersion", "0.3.0.0"
         END
     END
     BLOCK "VarFileInfo"

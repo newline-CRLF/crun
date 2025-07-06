@@ -41,14 +41,18 @@ void print_help() {
                << L"OPTIONS:\n"
                << L"    --help              Show this help message.\n"
                << L"    --version           Show version information.\n"
-               << L"    --cflags \"<flags>\"  Pass additional flags to the compiler.\n"
+               << L"    --cflags \"<flags>\"  Pass additional flags to the compiler. Overrides auto-detected flags.\n"
                << L"    --keep-temp         Keep the temporary directory after execution.\n"
                << L"    --verbose, -v       Enable verbose output.\n\n"
                << L"    --time              Measure and show the execution time of the program.\n\n"
+               << L"AUTOMATIC COMPILATION OPTIONS:\n"
+               << L"    crun automatically adds common compiler flags for optimization (-Os, -s) and detects required libraries (e.g., -lpthread, -lm) based on included headers. Use --cflags to override.\n\n"
                << L"EXAMPLE:\n"
                << L"    crun hello.c\n"
                << L"    crun app.cpp arg1 arg2 --verbose\n"
-               << L"    crun math.c --cflags \"-O2 -lm\"\n"
+               << L"    crun math.c // Automatically links -lm if math.h is included\n"
+               << L"    crun pthread_app.c // Automatically links -lpthread if pthread.h is included\n"
+               << L"    crun custom.c --cflags \"-O3 -DDEBUG\" // Override auto-flags\n"
                << L"    crun benchmark.cpp --time\n";
 }
 
@@ -56,7 +60,7 @@ void print_help() {
 // バージョン情報を表示する
 // -----------------------------------------------------------------------------
 void print_version() {
-    std::wcout << L"crun 0.2.0\n";
+    std::wcout << L"crun 0.3.0\n";
 }
 
 // -----------------------------------------------------------------------------
@@ -115,6 +119,73 @@ bool run_process(const std::wstring& command_line) {
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     return exit_code == 0;
+}
+
+// -----------------------------------------------------------------------------
+// 指定したコマンドラインでプロセスを実行し、標準出力をキャプチャして返す
+// -----------------------------------------------------------------------------
+std::pair<int, std::wstring> run_process_and_capture_output(const std::wstring& command_line) {
+    HANDLE hChildStd_OUT_Rd = NULL;
+    HANDLE hChildStd_OUT_Wr = NULL;
+
+    SECURITY_ATTRIBUTES saAttr;
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = NULL;
+
+    if (!CreatePipe(&hChildStd_OUT_Rd, &hChildStd_OUT_Wr, &saAttr, 0)) {
+        std::wcerr << L"Error: CreatePipe failed. Code: " << GetLastError() << L"\n";
+        return {-1, L""};
+    }
+
+    if (!SetHandleInformation(hChildStd_OUT_Rd, HANDLE_FLAG_INHERIT, 0)) {
+        std::wcerr << L"Error: SetHandleInformation failed. Code: " << GetLastError() << L"\n";
+        CloseHandle(hChildStd_OUT_Rd);
+        CloseHandle(hChildStd_OUT_Wr);
+        return {-1, L""};
+    }
+
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    si.hStdOutput = hChildStd_OUT_Wr;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.dwFlags |= STARTF_USESTDHANDLES;
+    ZeroMemory(&pi, sizeof(pi));
+
+    if (!CreateProcessW(NULL, const_cast<wchar_t*>(command_line.c_str()), NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        std::wcerr << L"Error: Failed to execute process for output capture. Code: " << GetLastError() << L"\n";
+        CloseHandle(hChildStd_OUT_Rd);
+        CloseHandle(hChildStd_OUT_Wr);
+        return {-1, L""};
+    }
+
+    CloseHandle(hChildStd_OUT_Wr); // Close the write end of the pipe in the parent process
+
+    std::string output_narrow;
+    CHAR read_buffer[4096];
+    DWORD bytes_read;
+    while (ReadFile(hChildStd_OUT_Rd, read_buffer, sizeof(read_buffer) - 1, &bytes_read, NULL) && bytes_read != 0) {
+        read_buffer[bytes_read] = '\0';
+        output_narrow.append(read_buffer, bytes_read);
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exit_code;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(hChildStd_OUT_Rd);
+
+    // Convert narrow string (UTF-8 assumed from compiler output) to wide string
+    int wchars_num = MultiByteToWideChar(CP_UTF8, 0, output_narrow.c_str(), -1, NULL, 0);
+    std::wstring output_wide(wchars_num, 0);
+    MultiByteToWideChar(CP_UTF8, 0, output_narrow.c_str(), -1, &output_wide[0], wchars_num);
+
+    return {static_cast<int>(exit_code), output_wide};
 }
 
 // -----------------------------------------------------------------------------
@@ -254,8 +325,43 @@ int main() {
     std::wstringstream compile_command;
     compile_command << L"\"" << compiler_path.wstring() << L"\" "
                     << L"\"" << fs::absolute(options.source_file).wstring() << L"\" "
-                    << L"-o \"" << executable_path.wstring() << L"\" "
-                    << options.compiler_flags;
+                    << L"-o \"" << executable_path.wstring() << L"\" ";
+
+    // デフォルトの最適化・サイズ削減フラグ
+    std::wstring auto_flags = L"-Os -s";
+
+    // 依存関係を解析し、自動でコンパイラフラグを追加
+    std::wstringstream dependency_command;
+    dependency_command << L"\"" << compiler_path.wstring() << L"\" -MM \"" << fs::absolute(options.source_file).wstring() << L"\"";
+
+    if (options.verbose) {
+        std::wcout << L"--- Analyzing Dependencies ---\n" << L"Command: " << dependency_command.str() << L"\n";
+    }
+
+    auto [dep_exit_code, dep_output] = run_process_and_capture_output(dependency_command.str());
+
+    if (dep_exit_code == 0) {
+        // 依存関係の出力からヘッダファイルを解析し、必要なライブラリフラグを追加
+        // 簡単な例として、pthread.h があれば -lpthread を追加
+        if (dep_output.find(L"pthread.h") != std::wstring::npos) {
+            auto_flags += L" -lpthread";
+        }
+        // 他のライブラリもここに追加可能 (例: math.h -> -lm, etc.)
+        if (dep_output.find(L"math.h") != std::wstring::npos) {
+            auto_flags += L" -lm";
+        }
+    } else {
+        if (options.verbose) {
+            std::wcerr << L"Warning: Failed to analyze dependencies. Continuing without auto-flags.\n";
+        }
+    }
+
+    compile_command << auto_flags;
+
+    // ユーザーが指定したフラグがあれば追加
+    if (!options.compiler_flags.empty()) {
+        compile_command << L" " << options.compiler_flags;
+    }
 
     // 詳細出力
     if (options.verbose) {
