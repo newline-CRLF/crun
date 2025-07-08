@@ -46,7 +46,7 @@ struct ProgramOptions {
 // --- ヘルプとバージョン情報を表示する関数 ---
 void print_help() {
     wprintf(
-        L"crun - A simple C/C++ runner (small version).\n\n"
+        L"crun - A simple C/C++ runner.\n\n"
         L"USAGE:\n"
         L"    crun <source_file> [program_arguments...] [options...]\n\n"
         L"OPTIONS:\n"
