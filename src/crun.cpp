@@ -28,6 +28,7 @@ const wchar_t* get_extension(const wchar_t* path);
 void get_stem(const wchar_t* path, wchar_t* stem, size_t stem_size);
 BOOL remove_directory_recursively(const wchar_t* path);
 BOOL read_file_content_wide(const wchar_t* path, wchar_t** content);
+void clean_temp_directories(const wchar_t* target_dir);
 
 // --- Options Structure ---
 // --- プログラム設定を保持する構造体 ---
@@ -40,6 +41,8 @@ struct ProgramOptions {
     BOOL keep_temp;            // 一時ディレクトリを保持するか
     BOOL verbose;              // 詳細出力を有効にするか
     BOOL measure_time;         // 実行時間を計測するか
+    BOOL warnings_all;         // 全ての警告を有効にするか
+    BOOL debug_build;          // デバッグビルドを有効にするか
 };
 
 // --- Help and Version ---
@@ -48,7 +51,8 @@ void print_help() {
     wprintf(
         L"crun - A simple C/C++ runner.\n\n"
         L"USAGE:\n"
-        L"    crun <source_file> [program_arguments...] [options...]\n\n"
+        L"    crun <source_file> [program_arguments...] [options...]\n"
+        L"    crun --clean\n\n"
         L"OPTIONS:\n"
         L"    --help              Show this help message.\n"
         L"    --version           Show version information.\n"
@@ -57,11 +61,14 @@ void print_help() {
         L"    --keep-temp         Keep the temporary directory after execution.\n"
         L"    --verbose, -v       Enable verbose output.\n"
         L"    --time              Measure and show the execution time.\n"
+        L"    --wall              Enable all compiler warnings (-Wall).\n"
+        L"    --debug, -g         Enable debug build (-g).\n"
+        L"    --clean             Remove temporary directories (crun_tmp_*) from the current directory.\n"
     );
 }
 
 void print_version() {
-    wprintf(L"crun 0.5.0\n");
+    wprintf(L"crun 0.6.0\n");
 }
 
 // --- Main Entry Point ---
@@ -70,9 +77,20 @@ int main() {
     int argc;
     // コマンドライン引数をワイド文字列として取得
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (argv == NULL || argc < 2) {
+    if (argv == NULL) { return 1; } // Should not happen
+
+    // --clean オプションを特別に処理
+    if (argc == 2 && wcscmp(argv[1], L"--clean") == 0) {
+        wchar_t current_dir[MAX_PATH];
+        GetCurrentDirectoryW(MAX_PATH, current_dir);
+        clean_temp_directories(current_dir);
+        LocalFree(argv);
+        return 0;
+    }
+
+    if (argc < 2) {
         print_help();
-        if (argv) LocalFree(argv);
+        LocalFree(argv);
         return 1;
     }
 
@@ -83,6 +101,7 @@ int main() {
     opts.program_args = (wchar_t**)malloc(sizeof(wchar_t*) * argc);
     if (!opts.program_args) {
         fwprintf_err(L"Error: Failed to allocate memory for arguments.\n");
+        LocalFree(argv);
         return 1;
     }
 
@@ -98,21 +117,27 @@ int main() {
             } else {
                 fwprintf_err(L"Error: Invalid compiler. Use 'gcc' or 'clang'.\n");
                 free(opts.program_args);
+                LocalFree(argv);
                 return 1;
             }
             compiler_next = FALSE;
             continue;
         }
-        if (wcscmp(arg, L"--help") == 0) { print_help(); free(opts.program_args); return 0; }
-        if (wcscmp(arg, L"--version") == 0) { print_version(); free(opts.program_args); return 0; }
+        if (wcscmp(arg, L"--help") == 0) { print_help(); free(opts.program_args); LocalFree(argv); return 0; }
+        if (wcscmp(arg, L"--version") == 0) { print_version(); free(opts.program_args); LocalFree(argv); return 0; }
         if (wcscmp(arg, L"--keep-temp") == 0) { opts.keep_temp = TRUE; continue; }
         if (wcscmp(arg, L"--verbose") == 0 || wcscmp(arg, L"-v") == 0) { opts.verbose = TRUE; continue; }
         if (wcscmp(arg, L"--time") == 0) { opts.measure_time = TRUE; continue; }
+        if (wcscmp(arg, L"--wall") == 0) { opts.warnings_all = TRUE; continue; }
+        if (wcscmp(arg, L"--debug") == 0 || wcscmp(arg, L"-g") == 0) { opts.debug_build = TRUE; continue; }
+        if (wcscmp(arg, L"--clean") == 0) { continue; } // Special handling at the start
         if (wcscmp(arg, L"--cflags") == 0) { cflags_next = TRUE; continue; }
         if (wcscmp(arg, L"--compiler") == 0) { compiler_next = TRUE; continue; }
+
         if (wcsncmp(arg, L"--", 2) == 0) {
             fwprintf_err(L"Error: Unknown option '%s'.\n", arg);
             free(opts.program_args);
+            LocalFree(argv);
             return 1;
         }
         // オプションでない最初の引数をソースファイルとして解釈
@@ -121,8 +146,8 @@ int main() {
         else { opts.program_args[opts.num_program_args++] = arg; }
     }
 
-    if (cflags_next || compiler_next) { fwprintf_err(L"Error: Option requires an argument.\n"); free(opts.program_args); return 1; }
-    if (!opts.source_file) { fwprintf_err(L"Error: No source file specified.\n"); print_help(); free(opts.program_args); return 1; }
+    if (cflags_next || compiler_next) { fwprintf_err(L"Error: Option requires an argument.\n"); free(opts.program_args); LocalFree(argv); return 1; }
+    if (!opts.source_file) { fwprintf_err(L"Error: No source file specified.\n"); print_help(); free(opts.program_args); LocalFree(argv); return 1; }
 
     // --- Path and File Setup ---
     // --- パスとファイルの設定 ---
@@ -131,17 +156,20 @@ int main() {
     if (!GetFullPathNameW(opts.source_file, MAX_PATH, full_source_path, NULL)) {
         fwprintf_err(L"Error: Could not get full path for source file.\n");
         free(opts.program_args);
+        LocalFree(argv);
         return 1;
     }
     if (!file_exists(full_source_path)) {
         fwprintf_err(L"Error: Source file not found: %s\n", full_source_path);
         free(opts.program_args);
+        LocalFree(argv);
         return 1;
     }
     const wchar_t* ext = get_extension(full_source_path);
     if (!ext || (wcscmp(ext, L".c") != 0 && wcscmp(ext, L".cpp") != 0)) {
         fwprintf_err(L"Error: Unsupported file type. Only .c and .cpp are supported.\n");
         free(opts.program_args);
+        LocalFree(argv);
         return 1;
     }
 
@@ -153,6 +181,7 @@ int main() {
     if (!CreateDirectoryW(temp_dir, NULL)) {
         fwprintf_err(L"Error: Failed to create temporary directory.\n");
         free(opts.program_args);
+        LocalFree(argv);
         return 1;
     }
 
@@ -180,13 +209,21 @@ int main() {
         fwprintf_err(L"Error: Compiler '%s' not found in PATH.\n", compiler_exe_name);
         if (!opts.keep_temp) remove_directory_recursively(temp_dir);
         free(opts.program_args);
+        LocalFree(argv);
         return 1;
     }
 
     // --- Compilation ---
     // --- コンパイル ---
     wchar_t compile_command[32767] = {0};
-    wchar_t auto_flags[256] = L"-O2 -s"; // 基本の最適化フラグ
+    wchar_t auto_flags[256] = L""; // 自動フラグ
+
+    // ビルドの種類に応じてフラグを設定
+    if (opts.debug_build) {
+        wcscpy_s(auto_flags, 256, L"-g"); // デバッグ情報
+    } else {
+        wcscpy_s(auto_flags, 256, L"-O2 -s"); // リリースビルド用の最適化
+    }
 
     // ソースコードの内容を読み込む
     wchar_t* source_content = NULL;
@@ -213,6 +250,11 @@ int main() {
         }
     }
 
+    // 警告フラグを追加
+    if (opts.warnings_all) {
+        wcscat_s(auto_flags, 256, L" -Wall");
+    }
+
     // 最終的なコンパイルコマンドを構築
     swprintf_s(compile_command, 32767, L"\"%s\" \"%s\" -o \"%s\" %s %s",
         compiler_path, full_source_path, executable_path, auto_flags,
@@ -223,6 +265,7 @@ int main() {
         fwprintf_err(L"Compilation failed.\n");
         if (!opts.keep_temp) remove_directory_recursively(temp_dir);
         free(opts.program_args);
+        LocalFree(argv);
         return 1;
     }
     if (opts.verbose) wprintf(L"Compilation successful.\n");
@@ -258,6 +301,7 @@ int main() {
     // --- クリーンアップ ---
     if (!opts.keep_temp) remove_directory_recursively(temp_dir);
     free(opts.program_args);
+    LocalFree(argv);
     return exit_code;
 }
 
@@ -456,4 +500,40 @@ BOOL read_file_content_wide(const wchar_t* path, wchar_t** content) {
 
     free(buffer);
     return TRUE;
+}
+
+// crunの一時ディレクトリを掃除する
+void clean_temp_directories(const wchar_t* target_dir) {
+    wchar_t search_path[MAX_PATH];
+    swprintf_s(search_path, MAX_PATH, L"%s\\crun_tmp_*", target_dir);
+
+    WIN32_FIND_DATAW find_data;
+    HANDLE h_find = FindFirstFileW(search_path, &find_data);
+
+    if (h_find == INVALID_HANDLE_VALUE) {
+        wprintf(L"No crun temporary directories to clean.\n");
+        return;
+    }
+
+    int count = 0;
+    do {
+        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            wchar_t dir_to_delete[MAX_PATH];
+            swprintf_s(dir_to_delete, MAX_PATH, L"%s\\%s", target_dir, find_data.cFileName);
+            wprintf(L"Removing: %s\n", dir_to_delete);
+            if (remove_directory_recursively(dir_to_delete)) {
+                count++;
+            } else {
+                fwprintf_err(L"Warning: Failed to remove directory %s\n", dir_to_delete);
+            }
+        }
+    } while (FindNextFileW(h_find, &find_data) != 0);
+
+    FindClose(h_find);
+
+    if (count > 0) {
+        wprintf(L"\nSuccessfully removed %d temporary director(y/ies).\n", count);
+    } else {
+        wprintf(L"No crun temporary directories found to clean.\n");
+    }
 }
