@@ -15,6 +15,25 @@
 
 #pragma comment(lib, "shell32.lib") // SHFileOperationW のためにリンク
 
+BOOL remove_directory_recursively(const wchar_t* path);
+
+// --- Global State for Cleanup ---
+// --- クリーンアップ用のグローバル変数 ---
+wchar_t g_temp_dir_to_clean[MAX_PATH] = {0};
+BOOL g_keep_temp = FALSE;
+
+// --- Console Control Handler ---
+// --- コンソール制御ハンドラ ---
+BOOL WINAPI ConsoleCtrlHandler(DWORD ctrl_type) {
+    // Ctrl+C, Ctrl+Break, Close eventを捕捉
+    if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT || ctrl_type == CTRL_CLOSE_EVENT) {
+        if (!g_keep_temp && g_temp_dir_to_clean[0] != L'\0') {
+            remove_directory_recursively(g_temp_dir_to_clean);
+        }
+    }
+    return FALSE; // 次のハンドラに制御を渡す
+}
+
 // --- Forward Declarations ---
 // --- 関数プロトタイプ宣言 ---
 void fwprintf_err(const wchar_t* format, ...);
@@ -33,7 +52,8 @@ void clean_temp_directories(const wchar_t* target_dir);
 // --- Options Structure ---
 // --- プログラム設定を保持する構造体 ---
 struct ProgramOptions {
-    wchar_t* source_file;      // ソースファイルパス
+    wchar_t** source_files;    // ソースファイルパスの配列
+    int num_source_files;      // ソースファイルの数
     wchar_t* compiler_flags;   // コンパイラフラグ
     wchar_t** program_args;    // プログラム引数
     int num_program_args;      // プログラム引数の数
@@ -68,12 +88,15 @@ void print_help() {
 }
 
 void print_version() {
-    wprintf(L"crun 0.6.0\n");
+    wprintf(L"crun 0.7.0\n");
 }
 
 // --- Main Entry Point ---
 // --- メインエントリーポイント ---
 int main() {
+    // コンソール制御ハンドラを設定
+    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+
     int argc;
     // コマンドライン引数をワイド文字列として取得
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -98,33 +121,39 @@ int main() {
     // --- 引数解析 ---
     ProgramOptions opts = {0};
     opts.compiler_name = L"gcc"; // デフォルトコンパイラ
+    opts.source_files = (wchar_t**)malloc(sizeof(wchar_t*) * argc);
     opts.program_args = (wchar_t**)malloc(sizeof(wchar_t*) * argc);
-    if (!opts.program_args) {
+    if (!opts.source_files || !opts.program_args) {
         fwprintf_err(L"Error: Failed to allocate memory for arguments.\n");
+        if (opts.source_files) free(opts.source_files);
+        if (opts.program_args) free(opts.program_args);
         LocalFree(argv);
         return 1;
     }
 
-    BOOL cflags_next = FALSE;    // --cflags の次の引数をフラグとして解釈するためのフラグ
-    BOOL compiler_next = FALSE; // --compiler の次の引数をコンパイラ名として解釈するためのフラグ
+    BOOL cflags_next = FALSE;
+    BOOL compiler_next = FALSE;
+    BOOL sources_ended = FALSE; // ソースファイルのリストが終了したかを示すフラグ
 
     for (int i = 1; i < argc; ++i) {
         wchar_t* arg = argv[i];
+
         if (cflags_next) { opts.compiler_flags = arg; cflags_next = FALSE; continue; }
         if (compiler_next) {
             if (wcscmp(arg, L"gcc") == 0 || wcscmp(arg, L"clang") == 0) {
                 opts.compiler_name = arg;
             } else {
                 fwprintf_err(L"Error: Invalid compiler. Use 'gcc' or 'clang'.\n");
-                free(opts.program_args);
+                free(opts.source_files); free(opts.program_args);
                 LocalFree(argv);
                 return 1;
             }
             compiler_next = FALSE;
             continue;
         }
-        if (wcscmp(arg, L"--help") == 0) { print_help(); free(opts.program_args); LocalFree(argv); return 0; }
-        if (wcscmp(arg, L"--version") == 0) { print_version(); free(opts.program_args); LocalFree(argv); return 0; }
+
+        if (wcscmp(arg, L"--help") == 0) { print_help(); free(opts.source_files); free(opts.program_args); LocalFree(argv); return 0; }
+        if (wcscmp(arg, L"--version") == 0) { print_version(); free(opts.source_files); free(opts.program_args); LocalFree(argv); return 0; }
         if (wcscmp(arg, L"--keep-temp") == 0) { opts.keep_temp = TRUE; continue; }
         if (wcscmp(arg, L"--verbose") == 0 || wcscmp(arg, L"-v") == 0) { opts.verbose = TRUE; continue; }
         if (wcscmp(arg, L"--time") == 0) { opts.measure_time = TRUE; continue; }
@@ -134,48 +163,68 @@ int main() {
         if (wcscmp(arg, L"--cflags") == 0) { cflags_next = TRUE; continue; }
         if (wcscmp(arg, L"--compiler") == 0) { compiler_next = TRUE; continue; }
 
+        // オプションかどうかを判定
         if (wcsncmp(arg, L"--", 2) == 0) {
             fwprintf_err(L"Error: Unknown option '%s'.\n", arg);
-            free(opts.program_args);
+            free(opts.source_files); free(opts.program_args);
             LocalFree(argv);
             return 1;
         }
-        // オプションでない最初の引数をソースファイルとして解釈
-        if (!opts.source_file) { opts.source_file = arg; }
-        // それ以降の引数をプログラムの引数として解釈
-        else { opts.program_args[opts.num_program_args++] = arg; }
+
+        // .c または .cpp で終わる引数をソースファイルとして解釈
+        const wchar_t* ext = get_extension(arg);
+        if (!sources_ended && ext && (wcscmp(ext, L".c") == 0 || wcscmp(ext, L".cpp") == 0)) {
+            opts.source_files[opts.num_source_files++] = arg;
+        } else {
+            // 最初の非ソースファイル以降はすべてプログラム引数とみなす
+            sources_ended = TRUE;
+            opts.program_args[opts.num_program_args++] = arg;
+        }
     }
 
-    if (cflags_next || compiler_next) { fwprintf_err(L"Error: Option requires an argument.\n"); free(opts.program_args); LocalFree(argv); return 1; }
-    if (!opts.source_file) { fwprintf_err(L"Error: No source file specified.\n"); print_help(); free(opts.program_args); LocalFree(argv); return 1; }
+    if (cflags_next || compiler_next) { fwprintf_err(L"Error: Option requires an argument.\n"); free(opts.source_files); free(opts.program_args); LocalFree(argv); return 1; }
+    if (opts.num_source_files == 0) { fwprintf_err(L"Error: No source files specified.\n"); print_help(); free(opts.source_files); free(opts.program_args); LocalFree(argv); return 1; }
 
     // --- Path and File Setup ---
     // --- パスとファイルの設定 ---
-    wchar_t full_source_path[MAX_PATH];
-    // ソースファイルのフルパスを取得
-    if (!GetFullPathNameW(opts.source_file, MAX_PATH, full_source_path, NULL)) {
-        fwprintf_err(L"Error: Could not get full path for source file.\n");
-        free(opts.program_args);
+    wchar_t main_source_full_path[MAX_PATH]; // 最初のソースファイルのフルパス（一時ディレクトリの場所を決めるため）
+    if (!GetFullPathNameW(opts.source_files[0], MAX_PATH, main_source_full_path, NULL)) {
+        fwprintf_err(L"Error: Could not get full path for source file: %s\n", opts.source_files[0]);
+        free(opts.source_files); free(opts.program_args);
         LocalFree(argv);
         return 1;
     }
-    if (!file_exists(full_source_path)) {
-        fwprintf_err(L"Error: Source file not found: %s\n", full_source_path);
-        free(opts.program_args);
-        LocalFree(argv);
-        return 1;
-    }
-    const wchar_t* ext = get_extension(full_source_path);
-    if (!ext || (wcscmp(ext, L".c") != 0 && wcscmp(ext, L".cpp") != 0)) {
-        fwprintf_err(L"Error: Unsupported file type. Only .c and .cpp are supported.\n");
-        free(opts.program_args);
-        LocalFree(argv);
-        return 1;
+
+    BOOL has_cpp = FALSE;
+    wchar_t all_source_files_str[32767];
+    all_source_files_str[0] = L'\0';
+
+    for (int i = 0; i < opts.num_source_files; ++i) {
+        wchar_t full_path[MAX_PATH];
+        if (!GetFullPathNameW(opts.source_files[i], MAX_PATH, full_path, NULL)) {
+            fwprintf_err(L"Error: Could not get full path for source file: %s\n", opts.source_files[i]);
+            free(opts.source_files); free(opts.program_args); LocalFree(argv); return 1;
+        }
+        if (!file_exists(full_path)) {
+            fwprintf_err(L"Error: Source file not found: %s\n", full_path);
+            free(opts.source_files); free(opts.program_args); LocalFree(argv); return 1;
+        }
+        const wchar_t* ext = get_extension(full_path);
+        if (!ext || (wcscmp(ext, L".c") != 0 && wcscmp(ext, L".cpp") != 0)) {
+            fwprintf_err(L"Error: Unsupported file type: %s. Only .c and .cpp are supported.\n", opts.source_files[i]);
+            free(opts.source_files); free(opts.program_args); LocalFree(argv); return 1;
+        }
+        if (wcscmp(ext, L".cpp") == 0) has_cpp = TRUE;
+
+        // Add to the string for the compile command
+        wcscat_s(all_source_files_str, 32767, L" \"");
+        wcscat_s(all_source_files_str, 32767, full_path);
+        wcscat_s(all_source_files_str, 32767, L"\"");
     }
 
     // 一時ディレクトリを作成
     wchar_t source_dir[MAX_PATH];
-    get_parent_path(full_source_path, source_dir, MAX_PATH);
+    get_parent_path(main_source_full_path, source_dir, MAX_PATH);
     wchar_t temp_dir[MAX_PATH];
     swprintf_s(temp_dir, MAX_PATH, L"%s\\crun_tmp_%lu_%lu", source_dir, GetTickCount(), GetCurrentProcessId());
     if (!CreateDirectoryW(temp_dir, NULL)) {
@@ -185,19 +234,21 @@ int main() {
         return 1;
     }
 
+    // グローバル変数に情報を保存
+    wcsncpy_s(g_temp_dir_to_clean, MAX_PATH, temp_dir, _TRUNCATE);
+    g_keep_temp = opts.keep_temp;
+
     // 実行ファイルパスを生成
     wchar_t source_stem[MAX_PATH];
-    get_stem(full_source_path, source_stem, MAX_PATH);
+    get_stem(main_source_full_path, source_stem, MAX_PATH);
     wchar_t executable_path[MAX_PATH];
     swprintf_s(executable_path, MAX_PATH, L"%s\\%s.exe", temp_dir, source_stem);
 
     // --- Compiler Setup ---
     // --- コンパイラの設定 ---
     wchar_t compiler_exe_name[20];
-    BOOL is_cpp = (wcscmp(ext, L".cpp") == 0);
-
-    // 拡張子に応じてコンパイラ実行ファイル名を決定
-    if (is_cpp) {
+    // 拡張子に応じてコンパイラ実行ファイル名を決定 (一つでも.cppがあればC++コンパイラ)
+    if (has_cpp) {
         wcscpy_s(compiler_exe_name, 20, (wcscmp(opts.compiler_name, L"gcc") == 0) ? L"g++.exe" : L"clang++.exe");
     } else {
         wcscpy_s(compiler_exe_name, 20, (wcscmp(opts.compiler_name, L"gcc") == 0) ? L"gcc.exe" : L"clang.exe");
@@ -206,7 +257,7 @@ int main() {
     // PATH環境変数からコンパイラのフルパスを検索
     wchar_t compiler_path[MAX_PATH];
     if (!find_executable_in_path(compiler_exe_name, compiler_path, MAX_PATH)) {
-        fwprintf_err(L"Error: Compiler '%s' not found in PATH.\n", compiler_exe_name);
+        fwprintf_err(L"Error: Compiler '%s' not found in PATH.\n" L"Please make sure MinGW (for gcc/g++) or Clang is installed and its 'bin' directory is in the system's PATH environment variable.\n", compiler_exe_name);
         if (!opts.keep_temp) remove_directory_recursively(temp_dir);
         free(opts.program_args);
         LocalFree(argv);
@@ -226,27 +277,31 @@ int main() {
     }
 
     // ソースコードの内容を読み込む
-    wchar_t* source_content = NULL;
-    if (read_file_content_wide(full_source_path, &source_content)) {
-        // Windows APIヘッダのインクルードをチェック
-        if (wcsstr(source_content, L"<windows.h>")) { wcscat_s(auto_flags, 256, L" -lkernel32 -luser32 -lshell32 -lgdi32 -lwinspool -lcomdlg32 -ladvapi32"); }
-        if (wcsstr(source_content, L"<winsock2.h>") || wcsstr(source_content, L"<winsock.h>")) { wcscat_s(auto_flags, 256, L" -lws2_32"); }
-        if (wcsstr(source_content, L"<shlobj.h>")) { wcscat_s(auto_flags, 256, L" -lole32"); }
+    for (int i = 0; i < opts.num_source_files; ++i) {
+        wchar_t full_path[MAX_PATH];
+        GetFullPathNameW(opts.source_files[i], MAX_PATH, full_path, NULL);
+        wchar_t* source_content = NULL;
+        if (read_file_content_wide(full_path, &source_content)) {
+            // Windows APIヘッダのインクルードをチェック
+            if (wcsstr(source_content, L"<windows.h>")) { wcscat_s(auto_flags, 256, L" -lkernel32 -luser32 -lshell32 -lgdi32 -lwinspool -lcomdlg32 -ladvapi32"); }
+            if (wcsstr(source_content, L"<winsock2.h>") || wcsstr(source_content, L"<winsock.h>")) { wcscat_s(auto_flags, 256, L" -lws2_32"); }
+            if (wcsstr(source_content, L"<shlobj.h>")) { wcscat_s(auto_flags, 256, L" -lole32"); }
 
-        // 標準ライブラリヘッダのインクルードをチェック
-        if (wcsstr(source_content, L"<pthread.h>")) { wcscat_s(auto_flags, 256, L" -lpthread"); }
-        if (wcsstr(source_content, L"<math.h>")) { wcscat_s(auto_flags, 256, L" -lm"); }
+            // 標準ライブラリヘッダのインクルードをチェック
+            if (wcsstr(source_content, L"<pthread.h>")) { wcscat_s(auto_flags, 256, L" -lpthread"); }
+            if (wcsstr(source_content, L"<math.h>")) { wcscat_s(auto_flags, 256, L" -lm"); }
 
-        free(source_content); // メモリを解放
-    } else {
-        // ファイルが読み込めない場合、従来のヘッダ依存性チェックにフォールバック
-        wchar_t dep_command[MAX_PATH * 2];
-        swprintf_s(dep_command, MAX_PATH * 2, L"\"%s\" -MM \"%s\"", compiler_path, full_source_path);
-        wchar_t* dep_output = NULL;
-        if (run_process_and_capture_output(dep_command, &dep_output) && dep_output) {
-            if (wcsstr(dep_output, L"pthread.h")) { wcscat_s(auto_flags, 256, L" -lpthread"); }
-            if (wcsstr(dep_output, L"math.h")) { wcscat_s(auto_flags, 256, L" -lm"); }
-            free(dep_output);
+            free(source_content); // メモリを解放
+        } else {
+            // ファイルが読み込めない場合、従来のヘッダ依存性チェックにフォールバック
+            wchar_t dep_command[MAX_PATH * 2];
+            swprintf_s(dep_command, MAX_PATH * 2, L"\"%s\" -MM %s", compiler_path, all_source_files_str);
+            wchar_t* dep_output = NULL;
+            if (run_process_and_capture_output(dep_command, &dep_output) && dep_output) {
+                if (wcsstr(dep_output, L"pthread.h")) { wcscat_s(auto_flags, 256, L" -lpthread"); }
+                if (wcsstr(dep_output, L"math.h")) { wcscat_s(auto_flags, 256, L" -lm"); }
+                free(dep_output);
+            }
         }
     }
 
@@ -256,8 +311,8 @@ int main() {
     }
 
     // 最終的なコンパイルコマンドを構築
-    swprintf_s(compile_command, 32767, L"\"%s\" \"%s\" -o \"%s\" %s %s",
-        compiler_path, full_source_path, executable_path, auto_flags,
+    swprintf_s(compile_command, 32767, L"\"%s\" %s -o \"%s\" %s %s",
+        compiler_path, all_source_files_str, executable_path, auto_flags,
         opts.compiler_flags ? opts.compiler_flags : L"");
 
     if (opts.verbose) wprintf(L"--- Compiling ---\nCommand: %s\n", compile_command);
@@ -408,7 +463,8 @@ BOOL run_process_and_capture_output(wchar_t* command_line, wchar_t** output) {
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD exit_code;
     GetExitCodeProcess(pi.hProcess, &exit_code);
-    CloseHandle(pi.hProcess); CloseHandle(pi.hThread); CloseHandle(h_child_stdout_rd);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
     return exit_code == 0;
 }
 
