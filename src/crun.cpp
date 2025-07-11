@@ -286,6 +286,7 @@ int main() {
             if (wcsstr(source_content, L"<windows.h>")) { wcscat_s(auto_flags, 256, L" -lkernel32 -luser32 -lshell32 -lgdi32 -lwinspool -lcomdlg32 -ladvapi32"); }
             if (wcsstr(source_content, L"<winsock2.h>") || wcsstr(source_content, L"<winsock.h>")) { wcscat_s(auto_flags, 256, L" -lws2_32"); }
             if (wcsstr(source_content, L"<shlobj.h>")) { wcscat_s(auto_flags, 256, L" -lole32"); }
+            if (wcsstr(source_content, L"<dwmapi.h>")) { wcscat_s(auto_flags, 256, L" -ldwmapi"); }
 
             // 標準ライブラリヘッダのインクルードをチェック
             if (wcsstr(source_content, L"<pthread.h>")) { wcscat_s(auto_flags, 256, L" -lpthread"); }
